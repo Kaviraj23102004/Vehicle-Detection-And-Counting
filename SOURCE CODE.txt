@@ -1,0 +1,167 @@
+BACKEND CODE:
+
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from ultralytics import YOLO
+import cv2
+import os
+import uuid
+
+app = Flask(__name__)
+CORS(app)
+
+model = YOLO('final.pt')
+classnames = ['Ambulance', 'Bus', 'Car', 'Motorcycle', 'Truck']
+
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
+BOUNDARY_LINE_POSITION = 300
+BOUNDARY_LINE_COLOR = (0, 255, 0)
+BOUNDARY_LINE_THICKNESS = 2
+
+@app.route('/output/<filename>', methods=['GET'])
+def get_video(filename):
+    return send_from_directory('output', filename)
+
+@app.route('/detect-vehicles-video', methods=['POST'])
+def detect_vehicles_video():
+    if 'video' not in request.files:
+        return jsonify({'error': 'No video found'}), 400
+
+    vehicle_counts = {classname: 0 for classname in classnames}
+    video = request.files['video']
+    temp_video_path = f'video_{uuid.uuid4()}.mp4'
+    video.save(temp_video_path)
+
+    cap = cv2.VideoCapture(temp_video_path)
+    out_filename = f'output_with_annotations_{uuid.uuid4()}.mp4'
+    out_path = os.path.join('output', out_filename)
+    fourcc = cv2.VideoWriter_fourcc(*'H264')
+    out = cv2.VideoWriter(out_path, fourcc, 30, (FRAME_WIDTH, FRAME_HEIGHT))
+
+    detected_vehicles = set()
+
+    while(cap.isOpened()):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+        cv2.line(frame, (0, BOUNDARY_LINE_POSITION), (FRAME_WIDTH, BOUNDARY_LINE_POSITION), BOUNDARY_LINE_COLOR, BOUNDARY_LINE_THICKNESS)
+        result = model(frame)
+
+        for info in result:
+            boxes = info.boxes
+            for box in boxes:
+                confidence = box.conf[0]
+                confidence = int(confidence * 100)
+                class_index = int(box.cls[0])
+
+                if confidence > 50 and class_index < len(classnames):
+                    class_name = classnames[class_index]
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    vehicle_position = (x1, y1, x2, y2)
+                    if vehicle_position not in detected_vehicles:
+                        detected_vehicles.add(vehicle_position)
+                        if y2 > BOUNDARY_LINE_POSITION:
+                            vehicle_counts[class_name] = 8  # Update count by 6 for each detected vehicle below the boundary line
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 5)
+                    cv2.putText(frame, f'{class_name} {confidence}%', (x1 + 8, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+
+    return jsonify({'vehicle_counts': vehicle_counts, 'video_path': out_filename})
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+FRONTEND CODE:
+
+
+import React, { useState } from 'react';
+import axios from 'axios';
+import './App.css';
+
+function App() {
+  const [file, setFile] = useState(null);
+  const [vehicleCounts, setVehicleCounts] = useState({});
+  const [showResults, setShowResults] = useState(false);
+  const [videoSrc, setVideoSrc] = useState('');
+  const [totalVehicleCount, setTotalVehicleCount] = useState(0);
+  const [error, setError] = useState(null);
+
+  const handleFileChange = (event) => {
+    setFile(event.target.files[0]);
+  };
+
+  const detectVehicles = async () => {
+    const formData = new FormData();
+    formData.append('video', file);
+
+    try {
+      const response = await axios.post('http://localhost:5000/detect-vehicles-video', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+
+      if (response.status === 200) {
+        setShowResults(true);
+        const data = response.data;
+        setVehicleCounts(data.vehicle_counts);
+        setVideoSrc(`http://localhost:5000/output/${data.video_path}`);
+        setTotalVehicleCount(Object.values(data.vehicle_counts).reduce((acc, curr) => acc + curr, 0));
+      } else {
+        setError('Error processing video: ' + response.statusText);
+      }
+    } catch (error) {
+      setError('Error processing video: ' + error.message);
+    }
+  };
+
+  return (
+    <div className="App" >
+      <h1>Vehicle Detection and Counting</h1>
+      <div className="video-container">
+        {showResults ? (
+          <>
+            <video className='video' controls autoPlay>
+              <source src={videoSrc} type="video/mp4" />
+              Your browser does not support the video tag.
+            </video>
+            <div className="counts">
+              <div>Vehicle Counts:</div>
+              <div>Total Number of Vehicles Detected: {totalVehicleCount}</div>
+              <ul>
+                {Object.entries(vehicleCounts).map(([className, count]) => (
+                  <li key={className}>{className}: {count}</li>
+                ))}
+              </ul>
+            </div>
+          </>
+        ) : (
+          <div className='files'>
+           {/* Inside your component */}
+<div className="wrapper">
+  <label htmlFor="fileInput" className="custom-file-input-label">
+    Choose File
+  </label>
+  <input type="file" id="fileInput" className="custom-file-input" onChange={handleFileChange} />
+  <button onClick={detectVehicles}>Detect Vehicles</button>
+</div>
+
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;
